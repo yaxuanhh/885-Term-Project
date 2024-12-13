@@ -1,0 +1,387 @@
+---
+title: "885project"
+author: "Yaxuan Huang"
+date: "2024-11-07"
+output: pdf_document
+---
+
+original Stanford Heart Transplant Data 
+
+ 
+fustat: dead or alive  
+age:  age (in days) 
+transplant: transplant indicator 
+
+You are expected to build a varying-coefficient regression model featuring the evaluation of nonlinear interactions to study if heart transplant may increase chance of survival and if this chance may be modified by age of patient receiving transplant.
+
+```{r setup}
+library(mgcv)
+library(dplyr)
+library(survival)
+
+heart_data = read.table("/Users/yaxuanhuang/Desktop/24Fall/Biostat 885/Project/Data/Heart_data.txt", sep = "", header = TRUE)
+
+mean(heart_data$futime[heart_data$transplant==1])
+mean(heart_data$futime[heart_data$transplant==0])
+mean(heart_data$futime)
+heart_surv = Surv(time = heart_data$futime, event = heart_data$fustat)
+heart_surv_fit = survfit(heart_surv ~ transplant, data = heart_data)
+surv_heart_plot = ggsurvplot(
+  heart_surv_fit, 
+  data = heart_data, 
+  pval = FALSE, 
+  conf.int = TRUE,
+  xlab = "Time (in days)", 
+  ylab = "Survival Probability",
+  title = 'Kaplan-Meier Plot',
+  tables.height = 0.2,  
+  tables.theme = theme_cleantable(),  
+  risk.table = FALSE,  
+  risk.table.y.text = FALSE,
+  break.time.by = 300  
+)
+surv_heart_plot$plot
+heart_data = heart_data %>% dplyr::select(fustat, age, transplant)
+
+# fustat: 0- Censored; 1- Dead
+# age: in years
+# transplant: 1=yes
+heart_data$survival = factor(1 - heart_data$fustat)
+
+heart_data = heart_data[heart_data$age>18,]
+heart_data = heart_data %>% arrange(age)
+
+new_df = data.frame(age = rep(heart_data$age, 2),
+                    transplant = c(rep(0, nrow(heart_data)), rep(1, nrow(heart_data))))
+
+```
+
+
+
+```{r glm fit}
+glm_fit = glm(survival ~ age + transplant + age : transplant, data = heart_data, family = binomial)
+summary(glm_fit)
+pred_prob_glm = predict(glm_fit, newdata = new_df, se.fit = T, type = "link")
+
+df_glm = data.frame(
+  age = new_df$age,
+  transplant = new_df$transplant,  
+  probability = plogis(pred_prob_glm$fit),
+  upper = plogis(pred_prob_glm$fit + 1.96 * pred_prob_glm$se.fit),
+  lower = plogis(pred_prob_glm$fit - 1.96 * pred_prob_glm$se.fit)
+)
+
+ggplot(df_glm, aes(x = age, y = probability, color = factor(transplant), linetype = factor(transplant))) +
+  geom_line(linewidth = 1.2) +  
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = factor(transplant)), alpha = 0.2, color = NA) + 
+  labs(
+    title = "Logistic Regression",
+    x = "Age",
+    y = "Survival Probability",
+    color = "Transplant",  
+    linetype = "Transplant",  
+    fill = "Transplant"  
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  scale_color_manual(values = c("blue", "red")) + 
+  scale_fill_manual(values = c("blue", "red")) + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +
+  theme(text= element_text(size=14)) + theme(axis.text= element_text(size=14)) +
+  theme(axis.title.y = element_text(margin= margin(t=0, r=10, b=0, l=0))) +
+  theme(legend.title = element_text(size=16), legend.text = element_text(size=14)) +
+  theme(plot.title = element_text(size=20))
+```
+
+
+```{r kernel smoothing - uniform}
+bandwidth = 30
+
+estimates_transplant_0 = estimates_transplant_1 = rep(0, length(heart_data$age))
+CI_lower_transplant_0 = CI_lower_transplant_1 = rep(0, length(heart_data$age))
+CI_upper_transplant_0 = CI_upper_transplant_1 = rep(0, length(heart_data$age))
+loglikelihood_uni = rep(0, length(heart_data$age))
+
+for (i in 1:length(heart_data$age)){
+  age_val = heart_data$age[i]
+  weights = ifelse(abs(heart_data$age - age_val) <= bandwidth, 1, 0)
+  heart_data_sub = heart_data %>% filter(weights == 1)
+  glm_model = glm(survival ~ age + transplant + age:transplant, data = heart_data_sub, family = binomial)
+  loglikelihood_uni[i] = logLik(glm_model)
+  new_data = new_df %>% filter(age == age_val)
+  if (nrow(new_data) == 4){
+    new_data = new_data[c(1, 3), ]
+  }
+  pred = predict(glm_model, newdata = new_data, type = "link", se.fit = T)
+  estimates_transplant_0[i] = plogis(pred$fit[1])  
+  CI_lower_transplant_0[i] = plogis(pred$fit[1] - 1.96 * pred$se.fit[1])
+  CI_upper_transplant_0[i] = plogis(pred$fit[1] + 1.96 * pred$se.fit[1])
+
+  estimates_transplant_1[i] = plogis(pred$fit[2])  
+  CI_lower_transplant_1[i] = plogis(pred$fit[2] - 1.96 * pred$se.fit[2])
+  CI_upper_transplant_1[i] = plogis(pred$fit[2] + 1.96 * pred$se.fit[2])
+}
+
+sum(loglikelihood_uni)
+
+df_gllc = data.frame(
+  age = new_df$age,
+  transplant = factor(new_df$transplant),
+  estimates = c(estimates_transplant_0, estimates_transplant_1),  
+  CI_lower = c(CI_lower_transplant_0, CI_lower_transplant_1),
+  CI_upper = c(CI_upper_transplant_0, CI_upper_transplant_1)
+)
+
+
+ggplot(df_gllc, aes(x = age, y = estimates, color = factor(transplant), linetype = factor(transplant))) + 
+  geom_line(linewidth = 1.2) + 
+  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper, fill = factor(transplant)), alpha = 0.2, color = NA) + 
+  labs(
+    title = "Kernel Regression with Uniform Kernel (h = 30)",
+    x = "Age",
+    y = "Survival Probability",
+    color = "Transplant",
+    linetype = "Transplant",
+    fill = "Transplant"
+  ) + 
+  theme_minimal() + 
+  theme(legend.position = "top") + 
+  scale_color_manual(values = c("blue", "red")) + 
+  scale_fill_manual(values = c("blue", "red"))+ 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +
+  theme(text= element_text(size=14)) + theme(axis.text= element_text(size=14)) +
+  theme(axis.title.y = element_text(margin= margin(t=0, r=10, b=0, l=0))) +
+  theme(legend.title = element_text(size=16), legend.text = element_text(size=14)) +
+  theme(plot.title = element_text(size=20))
+```
+
+```{r kernel smoothing - gaussian}
+bandwidth = 5
+estimates_transplant_0_gau = estimates_transplant_1_gau = rep(0, length(heart_data$age))
+CI_lower_transplant_0_gau = CI_lower_transplant_1_gau = rep(0, length(heart_data$age))
+CI_upper_transplant_0_gau = CI_upper_transplant_1_gau = rep(0, length(heart_data$age))
+loglikelihood_gaus = rep(0, length(heart_data$age))
+
+gaussian_kernel = function(x, x0, h) {
+  exp(-0.5 * ((x - x0) / h)^2) #  / (sqrt(2 * pi) * h)
+}
+
+for (i in 1:length(heart_data$age)){
+  age_val = heart_data$age[i]
+  weights = gaussian_kernel(heart_data$age, age_val, bandwidth)
+  glm_model = glm(survival ~ age + transplant + age:transplant, data = heart_data, 
+                  weights = weights, family = binomial)
+  
+  loglikelihood_gaus[i] = logLik(glm_model)
+  new_data = new_df %>% filter(age == age_val)
+  if (nrow(new_data) == 4){
+    new_data = new_data[c(1, 3), ]
+  }
+  pred = predict(glm_model, newdata = new_data, type = "link", se.fit = T)
+  estimates_transplant_0_gau[i] = plogis(pred$fit[1])  
+  CI_lower_transplant_0_gau[i] = plogis(pred$fit[1] - 1.96 * pred$se.fit[1])
+  CI_upper_transplant_0_gau[i] = plogis(pred$fit[1] + 1.96 * pred$se.fit[1])
+
+  estimates_transplant_1_gau[i] = plogis(pred$fit[2])  
+  CI_lower_transplant_1_gau[i] = plogis(pred$fit[2] - 1.96 * pred$se.fit[2])
+  CI_upper_transplant_1_gau[i] = plogis(pred$fit[2] + 1.96 * pred$se.fit[2])
+}
+print(sum(loglikelihood_gaus))
+df_kernel_gaus = data.frame(
+  age = new_df$age,
+  transplant = factor(new_df$transplant),
+  estimates = c(estimates_transplant_0_gau, estimates_transplant_1_gau),  
+  CI_lower = c(CI_lower_transplant_0_gau, CI_lower_transplant_1_gau),
+  CI_upper = c(CI_upper_transplant_0_gau, CI_upper_transplant_1_gau)
+)
+
+
+ggplot(df_kernel_gaus, aes(x = age, y = estimates, color = factor(transplant), linetype = factor(transplant))) + 
+  geom_line(linewidth = 1.2) + 
+  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper, fill = factor(transplant)), alpha = 0.2, color = NA) + 
+  labs(
+    title = "Kernel Regression with Gaussian Kernel (h = 5)",
+    x = "Age",
+    y = "Survival Probability",
+    color = "Transplant",
+    linetype = "Transplant",
+    fill = "Transplant"
+  ) + 
+  theme_minimal() + 
+  theme(legend.position = "top") + 
+  scale_color_manual(values = c("blue", "red")) + 
+  scale_fill_manual(values = c("blue", "red"))+ 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +
+  theme(text= element_text(size=14)) + theme(axis.text= element_text(size=14)) +
+  theme(axis.title.y = element_text(margin= margin(t=0, r=10, b=0, l=0))) +
+  theme(legend.title = element_text(size=16), legend.text = element_text(size=14)) +
+  theme(plot.title = element_text(size=20))
+```
+
+
+
+
+
+```{r kernel smoothing - Ekernel}
+bandwidth = 20
+
+Epanechnikov_kernel = function(x, x0, h) {
+  u = (x - x0) / h  
+  kernel_values = ifelse(abs(u) <= 1, 0.75 * (1 - u^2), 0)
+  return(kernel_values)
+}
+estimates_transplant_0_ek = estimates_transplant_1_ek = rep(0, length(heart_data$age))
+CI_lower_transplant_0_ek = CI_lower_transplant_1_ek = rep(0, length(heart_data$age))
+CI_upper_transplant_0_ek = CI_upper_transplant_1_ek = rep(0, length(heart_data$age))
+loglikelihood_ek = rep(0, length(heart_data$age))
+
+for (i in 1:length(heart_data$age)){
+  age_val = heart_data$age[i]
+  weights = Epanechnikov_kernel(heart_data$age, age_val, bandwidth)
+
+  glm_model = glm(survival ~ age + transplant + age:transplant, data = heart_data, 
+                  weights = weights, family = binomial)
+  loglikelihood_ek[i] = logLik(glm_model)
+  new_data = new_df %>% filter(age == age_val)
+  if (nrow(new_data) == 4){
+    new_data = new_data[c(1, 3), ]
+  }
+  pred = predict(glm_model, newdata = new_data, type = "link", se.fit = T)
+  estimates_transplant_0_ek[i] = plogis(pred$fit[1])  
+  CI_lower_transplant_0_ek[i] = plogis(pred$fit[1] - 1.96 * pred$se.fit[1])
+  CI_upper_transplant_0_ek[i] = plogis(pred$fit[1] + 1.96 * pred$se.fit[1])
+
+  estimates_transplant_1_ek[i] = plogis(pred$fit[2])  
+  CI_lower_transplant_1_ek[i] = plogis(pred$fit[2] - 1.96 * pred$se.fit[2])
+  CI_upper_transplant_1_ek[i] = plogis(pred$fit[2] + 1.96 * pred$se.fit[2])
+}
+sum(loglikelihood_ek)
+df_ekernel = data.frame(
+  age = new_df$age,
+  transplant = factor(new_df$transplant),
+  estimates = c(estimates_transplant_0_ek, estimates_transplant_1_ek),  
+  CI_lower = c(CI_lower_transplant_0_ek, CI_lower_transplant_1_ek),
+  CI_upper = c(CI_upper_transplant_0_ek, CI_upper_transplant_1_ek)
+)
+
+ggplot(df_ekernel, aes(x = age, y = estimates, color = factor(transplant), linetype = factor(transplant))) + 
+  geom_line(linewidth = 1.2) + 
+  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper, fill = factor(transplant)), alpha = 0.2, color = NA) + 
+  labs(
+    title = "Kernel Regression with Epanechnikov Kernel (h = 20)",
+    x = "Age",
+    y = "Survival Probability",
+    color = "Transplant",
+    linetype = "Transplant",
+    fill = "Transplant"
+  ) + 
+  theme_minimal() + 
+  theme(legend.position = "top") + 
+  scale_color_manual(values = c("blue", "red")) + 
+  scale_fill_manual(values = c("blue", "red"))+ 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +
+  theme(text= element_text(size=14)) + theme(axis.text= element_text(size=14)) +
+  theme(axis.title.y = element_text(margin= margin(t=0, r=10, b=0, l=0))) +
+  theme(legend.title = element_text(size=16), legend.text = element_text(size=14)) +
+  theme(plot.title = element_text(size=20))
+
+```
+
+
+
+
+
+```{r gam}
+k_range = seq(3,10) 
+AIC_gam = matrix(0, nrow = length(k_range), ncol = length(k_range))  
+for (m_idx in seq_along(k_range)) {   
+  for (n_idx in seq_along(k_range)) {     
+    m = k_range[m_idx]  
+    n = k_range[n_idx]
+    gam_fit = gam(survival ~ s(age, by = factor(transplant), k = m) + s(age, k = n), data = heart_data,                    
+                  family = binomial(link = "logit"))     
+    AIC_gam[m_idx, n_idx] = AIC(gam_fit)   
+  }
+}
+best_indices = which(AIC_gam == min(AIC_gam), arr.ind = TRUE) 
+best_indices
+gam_fit = gam(survival ~ s(age, by = factor(transplant), k = 4) + s(age,  k = 5), data = heart_data, family = binomial(link = "logit"))
+gam.check(gam_fit)
+plot.gam(gam_fit, residuals = TRUE, pch =1, cex = 1, shade = 
+         TRUE, shade.col = "lightblue", seWithMean = TRUE, 
+         pages = 1, all.terms = TRUE)
+pred_gam = predict(gam_fit, newdata = new_df, type = "link", se.fit = T)
+
+df_gam = data.frame(
+  age = new_df$age,
+  transplant = factor(new_df$transplant),
+  probability = plogis(pred_gam$fit),
+  upper = plogis(pred_gam$fit + 1.96 * pred_gam$se.fit),
+  lower = plogis(pred_gam$fit - 1.96 * pred_gam$se.fit)
+)
+
+ggplot(df_gam, aes(x = age, y = probability, color = factor(transplant), linetype = factor(transplant))) +
+  geom_line(linewidth = 1.2) +  
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = factor(transplant)), alpha = 0.2, color = NA) +
+  labs(
+    title = "GAM",
+    x = "Age",
+    y = "Survival Probability",
+    color = "Transplant",  
+    linetype = "Transplant",  
+    fill = "Transplant"  
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  scale_color_manual(values = c("blue", "red")) + 
+  scale_fill_manual(values = c("blue", "red"))+ 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +
+  theme(text= element_text(size=14)) + theme(axis.text= element_text(size=14)) +
+  theme(axis.title.y = element_text(margin= margin(t=0, r=10, b=0, l=0))) +
+  theme(legend.title = element_text(size=16), legend.text = element_text(size=14)) +
+  theme(plot.title = element_text(size=20))
+
+```
+
+
+
+
+
+```{r EDA}
+hist(heart_data$age, main = 'Histogram of Age', xlab = "Age")
+range_age = range(heart_data$age)
+heart_data$survival=as.numeric(heart_data$survival)
+nrow(heart_data %>% filter(transplant==1 & survival == 2))
+nrow(heart_data %>% filter(transplant==0 & survival == 2))
+sum(heart_data$survival==2)
+sum(heart_data$survival==0)
+
+mean(heart_data$age[heart_data$transplant==1])
+mean(heart_data$age[heart_data$transplant==0])
+mean(heart_data$age)
+mean(heart_data$futime[heart_data$transplant==1])
+
+sum(heart_data$transplant==0)
+
+
+heart_data$transplant_survival = interaction(heart_data$transplant, heart_data$survival)
+
+
+par(mar = c(5, 5, 4, 2))  
+boxplot(age ~ transplant_survival, data = heart_data,
+        main = "Boxplot of Age by Transplant and Survival Status",
+        ylab = "Age",
+        xlab = "Transplant and Survival Status",
+        col = c("lightblue", "lightgreen", "lightcoral", "lightyellow"),
+        names = c("Transplant = 0, Survival = 0", "Transplant = 1, Survival = 0", 
+                  "Transplant = 0, Survival = 1", "Transplant = 1, Survival = 1"),
+        cex.main = 1.5,  
+        cex.lab = 1.2,   
+        cex.axis = 1.1)  
+
+```
